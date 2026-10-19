@@ -129,7 +129,8 @@ h2.section { margin: 0; font-family: var(--display); font-weight: 700; font-size
   font-family: var(--display); font-weight: 800; font-size: 22px; color: #1E2026;
 }
 .logo.has-img { background: #FFFFFF !important; border: 1px solid var(--track); }
-.logo img { width: 70%; height: 70%; object-fit: contain; }
+.logo img { width: 72%; height: 72%; object-fit: contain; }
+.logo.has-img span { display: none; }
 .logo.lg { width: 64px; height: 64px; border-radius: 20px; font-size: 28px; }
 
 .dashed-btn {
