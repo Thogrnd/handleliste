@@ -50,18 +50,58 @@ export const COMMON = [
   'Tannkrem', 'Sjampo', 'Søppelposer', 'Bleier', 'Kattemat'
 ];
 
-export const UNITS = ['stk', 'pk', 'liter', 'kg', 'g', 'pose', 'boks', 'flaske'];
+export const UNITS = ['stk', 'liter', 'kg', 'g', 'pk', 'pose', 'boks', 'flaske'];
 const UNIT_ALIASES = { l: 'liter', ltr: 'liter', liter: 'liter', stk: 'stk', st: 'stk', pk: 'pk', pakke: 'pk', pakker: 'pk', kg: 'kg', g: 'g', gram: 'g', pose: 'pose', poser: 'pose', boks: 'boks', bokser: 'boks', flaske: 'flaske', flasker: 'flaske' };
+const UNIT_RE = '(stk|st|pk|pakke|pakker|ltr|liter|l|kg|gram|g|poser|pose|bokser|boks|flasker|flaske)';
+const NUM_RE = '(\\d+\\s+\\d\\/\\d|\\d+\\/\\d+|\\d*½|\\d+(?:[.,]\\d+)?)';
+export const normUnit = (u) => UNIT_ALIASES[String(u || '').toLowerCase()] || '';
 
-export function parseQty(q) {
-  const m = String(q || '').trim().toLowerCase().match(/^(\d+(?:[.,]\d+)?)\s*([a-zæøå]*)$/);
-  if (!m) return null;
-  const n = parseFloat(m[1].replace(',', '.'));
-  const unit = UNIT_ALIASES[m[2] || 'stk'] || m[2];
-  return { n, unit };
+// Tallene i tallvelgeren
+export const STEPS = [0.5, 1, 1.5, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+// Standardenhet for vanlige varer (alt annet blir «stk»)
+const UNIT_WORDS = {
+  liter: 'melk lettmelk helmelk skummetmelk ekstralettmelk havremelk sjokolademelk kefir juice appelsinjuice eplejuice brus cola pepsi solo farris vann mineralvann saft iste',
+  kg: 'poteter potet søtpotet gulrøtter gulrot epler appelsiner klementiner pærer løk rødløk kålrot',
+  pk: 'kjøttdeig karbonadedeig bacon pølser wienerpølser grillpølser kaffe kyllingfilet fiskekaker fiskeboller fiskepinner pålegg skinke salami servelat tortillas tortilla lomper rundstykker knekkebrød pasta spagetti makaroni ris havregryn toalettpapir dopapir tørkerull kjøkkenpapir bleier våtservietter',
+  boks: 'hermetiske tomatpuré kokosmelk tunfisk kikerter',
+  pose: 'chips potetgull smågodt'
+};
+const UNIT_LOOKUP = [];
+for (const [u, list] of Object.entries(UNIT_WORDS)) for (const w of list.split(' ')) if (w) UNIT_LOOKUP.push([w, u]);
+UNIT_LOOKUP.sort((a, b) => b[0].length - a[0].length);
+
+export function dictUnit(name) {
+  const n = norm(name); if (!n) return 'stk';
+  const words = n.split(/[\s,-]+/);
+  for (const [w, u] of UNIT_LOOKUP) if (words.includes(w)) return u;
+  for (const [w, u] of UNIT_LOOKUP) if (w.length >= 4 && words.some((x) => x.endsWith(w))) return u;
+  return 'stk';
 }
 
-export const fmtNum = (n) => String(Math.round(n * 100) / 100).replace('.', ',');
+export function parseNum(s) {
+  const t = String(s ?? '').trim().replace(',', '.');
+  if (!t) return NaN;
+  let m;
+  if ((m = t.match(/^(\d+)\s+(\d)\/(\d)$/))) return +m[1] + (+m[2] / +m[3]);
+  if ((m = t.match(/^(\d+)\/(\d+)$/))) return +m[1] / +m[2];
+  if ((m = t.match(/^(\d*)½$/))) return (+m[1] || 0) + 0.5;
+  return /^\d+(\.\d+)?$/.test(t) ? parseFloat(t) : NaN;
+}
+
+export function parseQty(q) {
+  const m = String(q || '').trim().toLowerCase().match(new RegExp('^' + NUM_RE + '\\s*([a-zæøå]*)$'));
+  if (!m) return null;
+  const n = parseNum(m[1]);
+  if (!isFinite(n)) return null;
+  return { n, unit: UNIT_ALIASES[m[2] || 'stk'] || m[2] };
+}
+
+export function fmtNum(n) {
+  const whole = Math.floor(n), frac = n - whole;
+  if (Math.abs(frac - 0.5) < 1e-9) return (whole ? whole : '') + '½';
+  return String(Math.round(n * 100) / 100).replace('.', ',');
+}
 export const fmtQty = ({ n, unit }) => `${fmtNum(n)} ${unit}`;
 
 export function mergeQty(a, b) {
@@ -71,14 +111,20 @@ export function mergeQty(a, b) {
   return `${a || '1 stk'} + ${b || '1 stk'}`;
 }
 
-// «melk 2 liter» / «egg 12» → navn og mengde
-export function splitInput(text) {
-  const t = text.trim().replace(/\s+/g, ' ');
-  const m = t.match(/^(.*?)\s+(\d+(?:[.,]\d+)?\s*(?:stk|st|pk|pakke|pakker|l|ltr|liter|kg|g|gram|pose|poser|boks|bokser|flaske|flasker)?)$/i);
-  if (m && m[1]) {
-    const p = parseQty(m[2]);
-    return { name: cap(m[1]), qty: p ? fmtQty(p) : m[2] };
-  }
+// «2 melk», «melk 2», «2 liter melk», «melk 2 liter» → navn og mengde.
+// unitFor(navn) gir standardenheten når enheten ikke er skrevet.
+export function splitInput(text, unitFor = dictUnit) {
+  const t = String(text || '').trim().replace(/\s+/g, ' ');
+  const make = (name, num, u) => {
+    const n = parseNum(num);
+    name = cap(name.trim());
+    if (!isFinite(n) || n <= 0 || !name) return null;
+    return { name, qty: fmtQty({ n, unit: normUnit(u) || unitFor(name) }) };
+  };
+  let m = t.match(new RegExp('^' + NUM_RE + '(?:\\s*' + UNIT_RE + '\\.?)?\\s+(.*\\D.*)$', 'i'));
+  if (m) { const r = make(m[3], m[1], m[2]); if (r) return r; }
+  m = t.match(new RegExp('^(.*?\\D.*?)\\s+' + NUM_RE + '\\s*' + UNIT_RE + '?\\.?$', 'i'));
+  if (m) { const r = make(m[1], m[2], m[3]); if (r) return r; }
   return { name: cap(t), qty: '' };
 }
 

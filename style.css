@@ -45,6 +45,7 @@ body { min-height: 100dvh; overscroll-behavior-y: none; }
 button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
 a { color: inherit; }
+[hidden] { display: none !important; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 
@@ -278,6 +279,33 @@ h2.section { margin: 0; font-family: var(--display); font-weight: 700; font-size
 .stepper .val { min-width: 40px; text-align: center; font-family: var(--display); font-weight: 700; font-size: 18px; }
 .stepper select { height: 44px; border: 0; background: var(--surface-2); border-radius: 12px; padding: 0 10px; font-weight: 600; }
 .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+
+.qty-row { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 12px; align-items: end; }
+.qty-row .stepper { height: 56px; border: 2px solid var(--track); border-radius: 18px; padding: 4px; }
+.qty-row .stepper:focus-within { border-color: var(--accent); }
+.qty-row .stepper button { width: 40px; height: 44px; flex-shrink: 0; }
+.qty-in { flex: 1; min-width: 0; width: 100%; border: 0; background: transparent; text-align: center; font-family: var(--display); font-weight: 700; font-size: 18px; }
+.qty-in:focus { outline: none; }
+.qty-row select.input { padding: 0 14px; }
+
+.qty-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.qty-btn {
+  min-height: 60px; border: 0; border-radius: 18px; background: var(--surface-2);
+  font-family: var(--display); font-weight: 700; font-size: 22px; color: var(--text);
+  transition: transform .15s cubic-bezier(.3,1.6,.5,1), background .15s;
+}
+.qty-btn:active { transform: scale(.9); background: var(--accent); color: var(--on-accent); }
+.suggest:empty { display: none; }
+
+/* dra for å endre rekkefølge */
+.store-card { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.stores.reordering .store-card { transition: transform .22s cubic-bezier(.2,.8,.2,1); }
+.store-card.lifted {
+  position: relative; z-index: 10; transition: none !important;
+  box-shadow: 0 18px 40px rgba(0,0,0,.18); background: var(--surface);
+  scale: 1.03;
+}
+.store-card.pressing { scale: .98; transition: scale .35s ease; }
 
 .seg { display: flex; background: var(--surface-2); border-radius: 16px; padding: 4px; gap: 4px; }
 .seg button { flex: 1; min-height: 44px; border: 0; border-radius: 12px; background: transparent; font-weight: 600; font-size: 14px; color: var(--muted); transition: background .2s, color .2s; }

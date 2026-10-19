@@ -1,6 +1,6 @@
 ﻿// Service worker: gjør at selve appen åpner uten nett.
 // Øk versjonsnummeret når du legger ut nye filer.
-const CACHE = 'handleliste-v2';
+const CACHE = 'handleliste-v3';
 const SHELL = [
   './', './index.html', './style.css', './app.js', './varer.js', './db-firebase.js', './db-local.js',
   './firebase-config.js', './manifest.webmanifest', './icons/icon.svg', './icons/icon-192.png', './icons/apple-touch-icon.png'

@@ -1,6 +1,6 @@
 ﻿// Handleliste – familiens felles handleliste
 import { firebaseConfig } from './firebase-config.js';
-import { CATEGORIES, COMMON, UNITS, categorize, norm, mergeQty, splitInput, parseQty, fmtNum, cap } from './varer.js';
+import { CATEGORIES, COMMON, UNITS, STEPS, categorize, norm, mergeQty, splitInput, parseQty, parseNum, fmtNum, fmtQty, dictUnit, cap } from './varer.js';
 
 /* =========================================================
    Ikoner
@@ -66,7 +66,7 @@ const cleanDomain = (s) => String(s || '').trim().toLowerCase().replace(/^https?
    ========================================================= */
 const S = {
   db: null, uid: null, fid: LS.get('fid'),
-  members: [], stores: [], items: [], trips: [],
+  members: [], stores: [], items: [], trips: [], names: [], dragging: false,
   view: { name: 'boot' },
   sort: LS.get('sort', 'cat'),
   theme: LS.get('theme', 'light'),
@@ -214,6 +214,62 @@ function touchStore(sid, text) {
   if (!storeOf(sid)) return;
   S.db.set(S.fid, 'stores', sid, { last: { text, at: now(), by: S.uid } }, true);
 }
+/* ---------- egne varer (forslag) og enheter ---------- */
+const nameKey = (name) => norm(name).replace(/[\/.#\[\]$]/g, '_').slice(0, 200) || '_';
+const nameRec = (name) => S.names.find((r) => r.id === nameKey(name));
+const defaultUnit = (name) => { const r = nameRec(name); return (r && r.unit) || dictUnit(name); };
+function bumpName(name) {
+  const r = nameRec(name);
+  S.db.set(S.fid, 'names', nameKey(name), { name, count: ((r && r.count) || 0) + 1, lastAt: now() }, true);
+}
+// Enheten blir ny standard etter tre handleturer på rad med samme (avvikende) enhet.
+function unitOps(doneItems) {
+  const ops = [], seen = new Set();
+  for (const it of doneItems) {
+    const k = nameKey(it.name); if (seen.has(k)) continue; seen.add(k);
+    const p = it.qty ? parseQty(it.qty) : null;
+    if (!p) continue;
+    const r = nameRec(it.name) || {};
+    const def = r.unit || dictUnit(it.name);
+    let data;
+    if (p.unit === def) data = { cand: null, streak: 0 };
+    else if (p.unit === r.cand) {
+      const streak = (r.streak || 0) + 1;
+      data = streak >= 3 ? { unit: p.unit, cand: null, streak: 0 } : { cand: p.unit, streak };
+    } else data = { cand: p.unit, streak: 1 };
+    ops.push({ type: 'set', c: 'names', id: k, data: { name: r.name || it.name, ...data }, merge: true });
+  }
+  return ops;
+}
+// Varer familien selv har skrevet inn, mest brukte først
+function vocab() {
+  const map = new Map();
+  const add = (name, c, at) => {
+    const k = nameKey(name); if (!name || k === '_') return;
+    const e = map.get(k) || { name, c: 0, at: 0 };
+    e.c += c; e.at = Math.max(e.at, at || 0); map.set(k, e);
+  };
+  S.names.forEach((r) => add(r.name, r.count || 0, r.lastAt));
+  if (map.size < 3) { // eldre data fra før forslagslisten fantes
+    S.trips.forEach((t) => (t.items || []).forEach((i) => { if (!map.has(nameKey(i.name))) add(i.name, 1, t.at); }));
+    S.items.forEach((i) => { if (!map.has(nameKey(i.name))) add(i.name, 1, i.createdAt); });
+  }
+  return [...map.values()].sort((a, b) => b.c - a.c || b.at - a.at).map((e) => e.name);
+}
+function frequentNames(sid, limit = 12) {
+  const open = new Set(S.items.filter((i) => !i.done && (!sid || i.storeId === sid)).map((i) => norm(i.name)));
+  return vocab().filter((n) => !open.has(norm(n))).slice(0, limit);
+}
+function autocomplete(q, limit = 6) {
+  const n = norm(q); if (!n) return [];
+  const seen = new Set(), all = [];
+  [...vocab(), ...COMMON].forEach((x) => { const k = norm(x); if (!seen.has(k)) { seen.add(k); all.push(x); } });
+  const starts = all.filter((x) => norm(x).startsWith(n) && norm(x) !== n);
+  const incl = all.filter((x) => !norm(x).startsWith(n) && norm(x).includes(n));
+  return [...starts, ...incl].slice(0, limit);
+}
+const parseInput = (text) => splitInput(text, defaultUnit);
+
 function addItem(sid, name, qty = '') {
   name = cap(String(name || '').trim());
   if (!name || !sid) return false;
@@ -223,7 +279,22 @@ function addItem(sid, name, qty = '') {
   const m = me();
   S.db.set(S.fid, 'items', id, { storeId: sid, name, qty: qty || '', cat: categorize(name), done: false, createdAt: now(), by: S.uid, byName: m.name || '' });
   touchStore(sid, `${firstName(m.name)} la til ${name.toLowerCase()}`);
+  bumpName(name);
   return true;
+}
+
+// Tallvelger: velg antall for en vare fra forslagsraden
+function openQtyPicker(name, sid, after) {
+  const unit = defaultUnit(name);
+  openSheet(`${head(name)}
+    <p class="muted" style="margin-top:-8px">Velg antall (${esc(unit)})</p>
+    <div class="qty-grid">${STEPS.map((n) => `<button type="button" class="qty-btn" data-n="${n}">${fmtNum(n)}</button>`).join('')}</div>
+    <button type="button" class="btn block" data-none>Legg til uten antall</button>`,
+  (sh, close) => {
+    const done = (qty) => { if (addItem(sid, name, qty)) { toast(`${name}${qty ? ' (' + qty + ')' : ''} lagt til`); if (after) after(); } close(); };
+    sh.querySelectorAll('[data-n]').forEach((b) => b.onclick = () => done(fmtQty({ n: +b.dataset.n, unit })));
+    sh.querySelector('[data-none]').onclick = () => done('');
+  });
 }
 function toggleItem(id) {
   const it = S.items.find((i) => i.id === id); if (!it) return;
@@ -315,36 +386,12 @@ async function finishTrip(sid) {
     } }];
     done.forEach((i) => ops.push({ type: 'delete', c: 'items', id: i.id }));
     ops.push({ type: 'set', c: 'stores', id: sid, data: { last: { text: `${firstName(me().name)} handlet ${done.length} varer`, at: now(), by: S.uid } }, merge: true });
+    ops.push(...unitOps(done));
     S.db.batch(S.fid, ops);
   }
   setPresence(null);
   confetti(1);
   toast(done.length ? 'Handletur lagret i historikken' : 'Ferdig!');
-}
-
-function frequentNames(sid, limit = 8) {
-  const counts = new Map();
-  const add = (n, w) => { const k = norm(n); if (!k) return; const e = counts.get(k) || { name: n, c: 0 }; e.c += w; counts.set(k, e); };
-  for (const t of S.trips) for (const i of t.items || []) add(i.name, t.storeId === sid ? 3 : 1);
-  const open = new Set(S.items.filter((i) => !i.done && (!sid || i.storeId === sid)).map((i) => norm(i.name)));
-  let list = [...counts.values()].filter((e) => !open.has(norm(e.name))).sort((a, b) => b.c - a.c).map((e) => e.name);
-  if (list.length < limit) for (const n of COMMON.slice(0, 20)) if (!open.has(norm(n)) && !list.some((x) => norm(x) === norm(n))) list.push(n);
-  return list.slice(0, limit);
-}
-function knownNames() {
-  const set = new Map();
-  const add = (n) => { const k = norm(n); if (k && !set.has(k)) set.set(k, n); };
-  S.trips.forEach((t) => (t.items || []).forEach((i) => add(i.name)));
-  S.items.forEach((i) => add(i.name));
-  COMMON.forEach(add);
-  return [...set.values()];
-}
-function autocomplete(q, limit = 6) {
-  const n = norm(q); if (!n) return [];
-  const all = knownNames();
-  const starts = all.filter((x) => norm(x).startsWith(n) && norm(x) !== n);
-  const incl = all.filter((x) => !norm(x).startsWith(n) && norm(x).includes(n));
-  return [...starts, ...incl].slice(0, limit);
 }
 
 /* =========================================================
@@ -471,7 +518,7 @@ async function startFamily(fid, name, isNew) {
 
 /* ---------- hjem ---------- */
 function refreshHome(first) {
-  const scr = $('#screen'); if (!scr) return;
+  const scr = $('#screen'); if (!scr || S.dragging) return;
   const shopping = S.members.filter(isLive);
   const liveText = shopping.length === 0 ? 'Ingen handler nå'
     : shopping.length === 1 ? `${firstName(shopping[0].name)} handler nå` : `${shopping.length} handler nå`;
@@ -490,7 +537,7 @@ function refreshHome(first) {
     </button>
     <span class="offline pill">${I.cloudOff} Uten nett – endringer lagres og sendes senere</span>
     ${S.db.mode === 'local' ? '<span class="pill">Demomodus – lagres bare på denne enheten</span>' : ''}
-    <div class="section-row"><h2 class="section">Butikker</h2><span class="small muted">${stores.length} ${stores.length === 1 ? 'liste' : 'lister'}</span></div>
+    <div class="section-row"><h2 class="section">Butikker</h2><span class="small muted">${stores.length > 1 ? 'Hold inne og dra for å sortere' : ''}</span></div>
     <div class="stores">
       ${stores.map((s, i) => storeCard(s, first ? i : -1)).join('')}
       <button class="dashed-btn" data-act="new-store">${I.plus} Ny butikkliste</button>
@@ -513,6 +560,72 @@ function storeCard(s, i) {
       <span class="store-meta">${here.length ? '<span class="live-dot on" style="display:inline-block;margin-right:6px;vertical-align:middle"></span>' : ''}${esc(meta)}</span>
     </span></button>`;
 }
+
+/* ---------- dra for å endre rekkefølge på butikker ---------- */
+(function bindReorder() {
+  let st = null;
+  const cancel = () => { if (!st) return; clearTimeout(st.timer); st.card.classList.remove('pressing'); st = null; };
+  const lift = () => {
+    if (!st) return;
+    const card = st.card, list = card.parentNode;
+    st.active = true; S.dragging = true;
+    card.classList.remove('pressing'); card.classList.add('lifted');
+    list.classList.add('reordering');
+    st.cards = [...list.querySelectorAll('.store-card')];
+    st.idx = st.target = st.cards.indexOf(card);
+    st.rects = st.cards.map((c) => c.getBoundingClientRect());
+    const r = st.rects[st.idx], nb = st.rects[st.idx + 1] || st.rects[st.idx - 1];
+    st.step = nb ? Math.abs(nb.top - r.top) : r.height + 12;
+    try { card.setPointerCapture(st.pid); } catch (e) {}
+    if (navigator.vibrate) navigator.vibrate(20);
+  };
+  app.addEventListener('pointerdown', (e) => {
+    const card = e.target.closest('.store-card');
+    if (!card || S.view.name !== 'home' || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    cancel();
+    st = { card, pid: e.pointerId, x: e.clientX, y: e.clientY, active: false };
+    card.classList.add('pressing');
+    st.timer = setTimeout(lift, 450);
+  });
+  app.addEventListener('pointermove', (e) => {
+    if (!st || e.pointerId !== st.pid) return;
+    const dy = e.clientY - st.y;
+    if (!st.active) { if (Math.hypot(e.clientX - st.x, dy) > 8) cancel(); return; }
+    st.card.style.transform = `translateY(${dy}px)`;
+    const c = st.rects[st.idx].top + st.rects[st.idx].height / 2 + dy;
+    let t = st.idx;
+    for (let i = 0; i < st.idx; i++) if (c < st.rects[i].top + st.rects[i].height / 2) { t = i; break; }
+    if (t === st.idx) for (let i = st.rects.length - 1; i > st.idx; i--) if (c > st.rects[i].top + st.rects[i].height / 2) { t = i; break; }
+    if (t !== st.target && navigator.vibrate) navigator.vibrate(6);
+    st.target = t;
+    st.cards.forEach((el, i) => {
+      if (i === st.idx) return;
+      let sh = 0;
+      if (st.idx < t && i > st.idx && i <= t) sh = -st.step;
+      else if (st.idx > t && i >= t && i < st.idx) sh = st.step;
+      el.style.transform = sh ? `translateY(${sh}px)` : '';
+    });
+  });
+  document.addEventListener('touchmove', (e) => { if (st && st.active) e.preventDefault(); }, { passive: false });
+  app.addEventListener('contextmenu', (e) => { if (e.target.closest('.store-card')) e.preventDefault(); });
+  const end = () => {
+    if (!st) return;
+    const s = st; st = null;
+    clearTimeout(s.timer); s.card.classList.remove('pressing');
+    if (!s.active) return;
+    suppressClick = true; setTimeout(() => { suppressClick = false; }, 120);
+    S.dragging = false;
+    if (s.target !== s.idx) {
+      const order = sortedStores().map((x) => x.id);
+      const [m] = order.splice(s.idx, 1); order.splice(s.target, 0, m);
+      order.forEach((id, i) => { const so = storeOf(id); if (so) so.order = i; });
+      S.db.batch(S.fid, order.map((id, i) => ({ type: 'set', c: 'stores', id, data: { order: i }, merge: true })));
+    }
+    refreshHome(false);
+  };
+  app.addEventListener('pointerup', end);
+  app.addEventListener('pointercancel', end);
+})();
 
 /* ---------- liste ---------- */
 function renderStore(back) {
@@ -544,7 +657,7 @@ function renderStore(back) {
   $('#addform').addEventListener('submit', (e) => {
     e.preventDefault();
     const v = input.value.trim(); if (!v) { openAddSheet(S.view.sid); return; }
-    const { name, qty } = splitInput(v);
+    const { name, qty } = parseInput(v);
     if (addItem(S.view.sid, name, qty)) { input.value = ''; renderSuggest(); }
   });
   input.addEventListener('input', renderSuggest);
@@ -611,7 +724,7 @@ function itemRow(it, i) {
 function renderSuggest() {
   const el = $('#suggest'); const input = $('#newitem'); if (!el || !input) return;
   const q = input.value.trim();
-  const names = q ? autocomplete(splitInput(q).name) : frequentNames(S.view.sid, 8);
+  const names = q ? autocomplete(parseInput(q).name) : frequentNames(S.view.sid, 12);
   el.innerHTML = names.map((n) => `<button type="button" class="chip ${q ? '' : 'outline'}" data-act="suggest" data-name="${esc(n)}">${q ? '' : '+ '}${esc(n)}</button>`).join('');
 }
 function flash(id) {
@@ -655,45 +768,79 @@ function bindSwipe(root) {
 }
 
 /* ---------- ark: legg til vare ---------- */
+// Felles felt for antall (½, 1, 1½, 2 … 10 eller fritt) og enhet
+function qtyFields(n, unit) {
+  const units = UNITS.includes(unit) ? UNITS : [...UNITS, unit];
+  return `<div class="qty-row">
+    <div class="field"><label for="q-n">Antall</label>
+      <div class="stepper"><button type="button" data-step="-1" aria-label="Færre">${I.minus}</button>
+      <input id="q-n" class="val qty-in" inputmode="decimal" autocomplete="off" placeholder="–" value="${isFinite(n) && n > 0 ? esc(fmtNum(n)) : ''}">
+      <button type="button" data-step="1" aria-label="Flere">${I.plus}</button></div></div>
+    <div class="field"><label for="q-unit">Enhet</label>
+      <select id="q-unit" class="input">${units.map((u) => `<option ${u === unit ? 'selected' : ''}>${esc(u)}</option>`).join('')}</select></div>
+  </div>`;
+}
+function bindQty(sh) {
+  const inp = $('#q-n', sh);
+  sh.querySelectorAll('[data-step]').forEach((b) => b.onclick = () => {
+    const cur = parseNum(inp.value);
+    let v;
+    if (+b.dataset.step > 0) v = !isFinite(cur) ? 1 : (STEPS.find((x) => x > cur + 1e-9) ?? Math.floor(cur) + 1);
+    else v = !isFinite(cur) ? NaN : ([...STEPS].reverse().find((x) => x < cur - 1e-9) ?? NaN);
+    inp.value = isFinite(v) ? fmtNum(v) : '';
+    inp.dispatchEvent(new Event('input'));
+  });
+  return () => {
+    const n = parseNum(inp.value);
+    const unit = $('#q-unit', sh).value;
+    return isFinite(n) && n > 0 ? fmtQty({ n, unit }) : '';
+  };
+}
+
 function openAddSheet(presetSid) {
   const stores = sortedStores();
   let sid = presetSid || (S.view.name === 'store' ? S.view.sid : (stores[0] && stores[0].id));
-  let n = 1, unit = 'stk';
+  let unitTouched = false, nTouched = false;
   openSheet(`${head('Legg til vare')}
     <div class="field"><label for="a-name">Hva trenger dere?</label>
-      <input id="a-name" class="input" placeholder="F.eks. melk" autocomplete="off" autofocus>
+      <input id="a-name" class="input" placeholder="F.eks. melk eller 2 melk" autocomplete="off" autofocus>
       <div class="chips" id="a-auto"></div></div>
-    <div class="row"><span style="font-weight:500">Antall</span>
-      <div class="stepper"><button type="button" id="a-minus" aria-label="Færre">${I.minus}</button><span class="val" id="a-n">1</span>
-      <button type="button" id="a-plus" aria-label="Flere">${I.plus}</button>
-      <label class="sr-only" for="a-unit">Enhet</label><select id="a-unit">${UNITS.map((u) => `<option>${u}</option>`).join('')}</select></div></div>
+    ${qtyFields(NaN, 'stk')}
     <div class="field"><span class="label">Butikk</span><div class="chips" id="a-stores"></div></div>
-    <div class="field"><span class="label">Ofte kjøpt</span><div class="chips" id="a-freq"></div></div>
+    <div class="field" id="a-freq-wrap"><span class="label">Ofte kjøpt</span><div class="chips" id="a-freq"></div></div>
     <button class="btn primary block" id="a-add">${I.plus} Legg til i listen</button>`,
   (sh, close) => {
-    const nameEl = $('#a-name', sh);
+    const nameEl = $('#a-name', sh), unitEl = $('#q-unit', sh), nEl = $('#q-n', sh);
+    const getQty = bindQty(sh);
+    const syncUnit = () => {
+      if (unitTouched) return;
+      const p = parseInput(nameEl.value);
+      const u = defaultUnit(p.name || nameEl.value);
+      if (![...unitEl.options].some((o) => o.value === u)) unitEl.add(new Option(u, u));
+      unitEl.value = u;
+    };
     const drawStores = () => { $('#a-stores', sh).innerHTML = stores.map((s) => `<button type="button" class="chip square ${s.id === sid ? 'on' : ''}" data-sid="${s.id}" aria-pressed="${s.id === sid}"><span class="dot" style="background:${esc(s.color)}"></span>${esc(s.name)}</button>`).join(''); };
-    const drawFreq = () => { $('#a-freq', sh).innerHTML = frequentNames(sid, 8).map((x) => `<button type="button" class="chip outline" data-quick="${esc(x)}">+ ${esc(x)}</button>`).join(''); };
-    const drawAuto = () => { $('#a-auto', sh).innerHTML = autocomplete(nameEl.value).map((x) => `<button type="button" class="chip" data-fill="${esc(x)}">${esc(x)}</button>`).join(''); };
+    const drawFreq = () => {
+      const list = frequentNames(sid, 10);
+      $('#a-freq-wrap', sh).hidden = !list.length;
+      $('#a-freq', sh).innerHTML = list.map((x) => `<button type="button" class="chip outline" data-fill="${esc(x)}">${esc(x)}</button>`).join('');
+    };
+    const drawAuto = () => { $('#a-auto', sh).innerHTML = autocomplete(parseInput(nameEl.value).name).map((x) => `<button type="button" class="chip" data-fill="${esc(x)}">${esc(x)}</button>`).join(''); };
     drawStores(); drawFreq();
-    nameEl.addEventListener('input', drawAuto);
+    nameEl.addEventListener('input', () => { drawAuto(); syncUnit(); });
     nameEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#a-add', sh).click(); } });
+    unitEl.addEventListener('change', () => { unitTouched = true; });
+    nEl.addEventListener('input', () => { nTouched = true; });
     $('#a-stores', sh).addEventListener('click', (e) => { const b = e.target.closest('[data-sid]'); if (b) { sid = b.dataset.sid; drawStores(); drawFreq(); } });
-    $('#a-auto', sh).addEventListener('click', (e) => { const b = e.target.closest('[data-fill]'); if (b) { nameEl.value = b.dataset.fill; drawAuto(); nameEl.focus(); } });
-    $('#a-freq', sh).addEventListener('click', (e) => {
-      const b = e.target.closest('[data-quick]');
-      if (b && addItem(sid, b.dataset.quick)) { b.remove(); toast(`${b.dataset.quick} lagt til i ${storeOf(sid).name}`); }
-    });
-    const setN = (v) => { n = Math.max(1, v); $('#a-n', sh).textContent = fmtNum(n); };
-    $('#a-minus', sh).onclick = () => setN(n - 1);
-    $('#a-plus', sh).onclick = () => setN(n + 1);
-    $('#a-unit', sh).onchange = (e) => { unit = e.target.value; };
+    const fill = (e) => { const b = e.target.closest('[data-fill]'); if (b) { nameEl.value = b.dataset.fill; drawAuto(); syncUnit(); nEl.focus(); } };
+    $('#a-auto', sh).addEventListener('click', fill);
+    $('#a-freq', sh).addEventListener('click', fill);
     $('#a-add', sh).onclick = () => {
-      const name = nameEl.value.trim();
-      if (!name) { nameEl.focus(); return; }
+      if (!nameEl.value.trim()) { nameEl.focus(); return; }
       if (!sid) { toast('Lag en butikk først'); return; }
-      const qty = n === 1 && unit === 'stk' ? '' : `${fmtNum(n)} ${unit}`;
-      if (addItem(sid, name, qty)) { toast(`${cap(name)} lagt til i ${storeOf(sid).name}`); close(); }
+      const p = parseInput(nameEl.value);
+      const qty = (nTouched || !p.qty) ? getQty() : p.qty;
+      if (addItem(sid, p.name, qty)) { toast(`${p.name} lagt til i ${storeOf(sid).name}`); close(); }
     };
   });
 }
@@ -702,18 +849,28 @@ function openAddSheet(presetSid) {
 function openItemSheet(id) {
   const it = S.items.find((i) => i.id === id); if (!it) return;
   const others = sortedStores().filter((s) => s.id !== it.storeId);
+  const p = it.qty ? parseQty(it.qty) : null;
+  const odd = it.qty && !p; // f.eks. «1 stk + 2 liter»
   openSheet(`${head('Endre vare')}
     <div class="field"><label for="e-name">Navn</label><input id="e-name" class="input" value="${esc(it.name)}"></div>
-    <div class="field"><label for="e-qty">Mengde</label><input id="e-qty" class="input" value="${esc(it.qty || '')}" placeholder="F.eks. 2 liter"></div>
+    ${qtyFields(p ? p.n : NaN, p ? p.unit : defaultUnit(it.name))}
+    ${odd ? `<p class="small muted" style="margin-top:-8px">Nå: ${esc(it.qty)}. Velg antall og enhet for å erstatte.</p>` : ''}
     <div class="field"><label for="e-cat">Kategori</label><select id="e-cat" class="input">${CATEGORIES.map((c) => `<option ${c === (it.cat || categorize(it.name)) ? 'selected' : ''}>${c}</option>`).join('')}</select></div>
     ${others.length ? `<div class="field"><span class="label">Flytt til</span><div class="chips">${others.map((s) => `<button type="button" class="chip square" data-move="${s.id}"><span class="dot" style="background:${esc(s.color)}"></span>${esc(s.name)}</button>`).join('')}</div></div>` : ''}
     <div class="actions-col"><button class="btn primary block" id="e-save">Lagre</button><button class="btn danger block" id="e-del">Slett vare</button></div>`,
   (sh, close) => {
+    const getQty = bindQty(sh);
+    let qtyTouched = false;
+    $('#q-n', sh).addEventListener('input', () => { qtyTouched = true; });
+    $('#q-unit', sh).addEventListener('change', () => { qtyTouched = true; });
     $('#e-save', sh).onclick = () => {
       const name = cap($('#e-name', sh).value.trim()); if (!name) return;
-      const patch = { name, qty: $('#e-qty', sh).value.trim(), cat: $('#e-cat', sh).value };
+      const qty = odd && !qtyTouched ? it.qty : getQty();
+      const patch = { name, qty, cat: $('#e-cat', sh).value };
       if (norm(name) !== norm(it.name) && $('#e-cat', sh).value === (it.cat || categorize(it.name))) patch.cat = categorize(name);
-      S.db.update(S.fid, 'items', id, patch); close();
+      S.db.update(S.fid, 'items', id, patch);
+      if (norm(name) !== norm(it.name)) bumpName(name);
+      close();
     };
     $('#e-del', sh).onclick = () => { close(); deleteItem(id); };
     sh.querySelectorAll('[data-move]').forEach((b) => b.onclick = () => { close(); setTimeout(() => moveItems([id], b.dataset.move), 220); });
@@ -872,8 +1029,11 @@ document.addEventListener('click', async (e) => {
     case 'finish': finishTrip(S.view.sid); break;
     case 'suggest': {
       const input = $('#newitem');
-      const { qty } = input.value.trim() ? splitInput(input.value) : { qty: '' };
-      if (addItem(S.view.sid, t.dataset.name, qty)) { input.value = ''; renderSuggest(); }
+      const name = t.dataset.name;
+      const typed = input.value.trim() ? parseQty(parseInput(input.value).qty) : null;
+      const clear = () => { input.value = ''; renderSuggest(); };
+      if (typed) { if (addItem(S.view.sid, name, fmtQty({ n: typed.n, unit: defaultUnit(name) }))) clear(); }
+      else openQtyPicker(name, S.view.sid, clear);
       break;
     }
     case 'flyer': {
@@ -934,7 +1094,7 @@ function subscribe() {
       toast('Du har ikke lenger tilgang til denne familielisten');
     }
   });
-  S.unsubs = [w('members', 'members'), w('stores', 'stores'), w('items', 'items'), w('trips')];
+  S.unsubs = [w('members', 'members'), w('stores', 'stores'), w('items', 'items'), w('trips'), w('names')];
 }
 function unsubscribe() { S.unsubs.forEach((u) => { try { u(); } catch (e) {} }); S.unsubs = []; }
 setInterval(() => { if (S.view.name === 'home') refreshHome(false); }, 60000); // oppdater «x min siden»
