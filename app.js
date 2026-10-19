@@ -23,6 +23,8 @@ const I = {
   copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
   cloudOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="m2 2 20 20"/><path d="M5.8 5.8A7 7 0 0 0 7 19h10a5 5 0 0 0 2.2-.5"/><path d="M21.6 15.3A5 5 0 0 0 17.5 10h-1.3A7 7 0 0 0 9.4 5.1"/></svg>',
   image: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-4.5-4.5L5 21"/></svg>',
+  list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 6h10M10 12h10M10 18h10"/><path d="m3.5 6 1.5 1.5L7.5 5"/><path d="m3.5 12 1.5 1.5 2.5-2.5"/><path d="m3.5 18 1.5 1.5 2.5-2.5"/></svg>',
+  cal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><rect x="3" y="4" width="18" height="18" rx="3"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>',
   redo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>'
 };
 
@@ -66,11 +68,11 @@ const cleanDomain = (s) => String(s || '').trim().toLowerCase().replace(/^https?
    ========================================================= */
 const S = {
   db: null, uid: null, fid: LS.get('fid'),
-  members: [], stores: [], items: [], trips: [], names: [], dragging: false,
+  members: [], stores: [], items: [], trips: [], names: [], meta: [], dragging: false, todoChecked: false, newAssignee: null, newDue: null,
   view: { name: 'boot' },
   sort: LS.get('sort', 'cat'),
   theme: LS.get('theme', 'light'),
-  unsubs: [], seen: new Set(), popId: null, ready: { members: false, stores: false, items: false }
+  unsubs: [], seen: new Set(), popId: null, ready: { members: false, stores: false, items: false, meta: false }
 };
 const me = () => S.members.find((m) => m.id === S.uid) || { name: LS.get('name', ''), color: LS.get('color', COLORS[0]) };
 const memberOf = (uid) => S.members.find((m) => m.id === uid);
@@ -80,6 +82,21 @@ const sortedStores = () => [...S.stores].sort((a, b) => (a.order || 0) - (b.orde
 const initialOf = (name) => (String(name || '?').trim().charAt(0) || '?').toUpperCase();
 const firstName = (name) => String(name || '').trim().split(' ')[0] || 'Noen';
 const isLive = (m) => m && m.shoppingIn && m.lastSeen && now() - m.lastSeen < LIVE_MS;
+const isTodo = (s) => !!(s && s.type === 'todo');
+const DONE_TTL = 24 * 3600 * 1000;
+const expired = (i) => i.done && i.doneAt && now() - i.doneAt > DONE_TTL;
+const visibleIn = (sid) => { const s = storeOf(sid); const l = itemsIn(sid); return isTodo(s) ? l.filter((i) => !expired(i)) : l; };
+const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+function dueInfo(due) {
+  if (!due) return null;
+  const [y, m, d] = String(due).split('-').map(Number);
+  if (!y || !m || !d) return null;
+  const dt = new Date(y, m - 1, d), t = new Date(); t.setHours(0, 0, 0, 0);
+  const diff = Math.round((dt - t) / 86400000);
+  const label = diff === 0 ? 'I dag' : diff === 1 ? 'I morgen' : diff === -1 ? 'I går'
+    : `${cap(new Intl.DateTimeFormat('nb-NO', { weekday: 'short' }).format(dt).replace('.', ''))} ${d}. ${new Intl.DateTimeFormat('nb-NO', { month: 'short' }).format(dt).replace('.', '')}`;
+  return { label, diff, cls: diff < 0 ? 'late' : diff === 0 ? 'today' : '' };
+}
 
 function avatar(m, cls = '') {
   if (!m) return '';
@@ -88,6 +105,7 @@ function avatar(m, cls = '') {
 }
 function logo(store, cls = '') {
   if (!store) return '';
+  if (isTodo(store)) return `<div class="logo todo-ic ${cls}" style="background:${esc(store.color || COLORS[5])}" aria-hidden="true">${I.list}</div>`;
   const mono = `<span>${esc(initialOf(store.name))}</span>`;
   let img = '';
   if (store.image) img = `<img src="${esc(store.image)}" alt="">`;
@@ -194,13 +212,13 @@ function ask({ title, text = '', html = '', buttons }) {
   });
 }
 
-function pickStore({ title, exclude }) {
-  const list = sortedStores().filter((s) => s.id !== exclude);
-  if (!list.length) { toast('Du har ingen andre butikker ennå'); return Promise.resolve(null); }
+function pickStore({ title, exclude, todo = false }) {
+  const list = sortedStores().filter((s) => s.id !== exclude && isTodo(s) === todo);
+  if (!list.length) { toast(todo ? 'Du har ingen andre gjøremålslister' : 'Du har ingen andre butikker ennå'); return Promise.resolve(null); }
   return new Promise((resolve) => {
     let value = null;
     openSheet(`${head(title)}<div class="actions-col">${list.map((s) =>
-      `<button class="list-row" data-sid="${s.id}">${logo(s)}<span class="grow"><b>${esc(s.name)}</b><br><span class="small muted">${itemsIn(s.id).filter((i) => !i.done).length} på listen</span></span>${I.chev}</button>`).join('')}</div>`,
+      `<button class="list-row" data-sid="${s.id}">${logo(s)}<span class="grow"><b>${esc(s.name)}</b><br><span class="small muted">${visibleIn(s.id).filter((i) => !i.done).length} på listen</span></span>${I.chev}</button>`).join('')}</div>`,
     (sheet, close) => {
       sheet.querySelectorAll('[data-sid]').forEach((el) => el.addEventListener('click', () => { value = el.dataset.sid; close(); }));
     }, { onClose: () => resolve(value) });
@@ -252,7 +270,7 @@ function vocab() {
   S.names.forEach((r) => add(r.name, r.count || 0, r.lastAt));
   if (map.size < 3) { // eldre data fra før forslagslisten fantes
     S.trips.forEach((t) => (t.items || []).forEach((i) => { if (!map.has(nameKey(i.name))) add(i.name, 1, t.at); }));
-    S.items.forEach((i) => { if (!map.has(nameKey(i.name))) add(i.name, 1, i.createdAt); });
+    S.items.forEach((i) => { if (!isTodo(storeOf(i.storeId)) && !map.has(nameKey(i.name))) add(i.name, 1, i.createdAt); });
   }
   return [...map.values()].sort((a, b) => b.c - a.c || b.at - a.at).map((e) => e.name);
 }
@@ -270,16 +288,21 @@ function autocomplete(q, limit = 6) {
 }
 const parseInput = (text) => splitInput(text, defaultUnit);
 
-function addItem(sid, name, qty = '') {
+function addItem(sid, name, qty = '', extra = {}) {
   name = cap(String(name || '').trim());
   if (!name || !sid) return false;
-  const dup = itemsIn(sid).find((i) => !i.done && norm(i.name) === norm(name));
-  if (dup) { flash(dup.id); toast(`${dup.name} står allerede på listen`); return false; }
+  const todo = isTodo(storeOf(sid));
+  if (!todo) {
+    const dup = itemsIn(sid).find((i) => !i.done && norm(i.name) === norm(name));
+    if (dup) { flash(dup.id); toast(`${dup.name} står allerede på listen`); return false; }
+  }
   const id = S.db.newId();
   const m = me();
-  S.db.set(S.fid, 'items', id, { storeId: sid, name, qty: qty || '', cat: categorize(name), done: false, createdAt: now(), by: S.uid, byName: m.name || '' });
-  touchStore(sid, `${firstName(m.name)} la til ${name.toLowerCase()}`);
-  bumpName(name);
+  const data = { storeId: sid, name, qty: todo ? '' : (qty || ''), cat: todo ? '' : categorize(name), done: false, createdAt: now(), by: S.uid, byName: m.name || '' };
+  if (todo) { data.assignee = extra.assignee || null; data.due = extra.due || null; }
+  S.db.set(S.fid, 'items', id, data);
+  touchStore(sid, todo ? `${firstName(m.name)} la til «${name}»` : `${firstName(m.name)} la til ${name.toLowerCase()}`);
+  if (!todo) bumpName(name);
   return true;
 }
 
@@ -302,7 +325,7 @@ function toggleItem(id) {
   S.popId = done ? id : null;
   S.db.update(S.fid, 'items', id, { done, doneAt: done ? now() : null, doneBy: done ? S.uid : null });
   if (done) {
-    touchStore(it.storeId, `${firstName(me().name)} krysset av ${it.name.toLowerCase()}`);
+    touchStore(it.storeId, isTodo(storeOf(it.storeId)) ? `${firstName(me().name)} fullførte «${it.name}»` : `${firstName(me().name)} krysset av ${it.name.toLowerCase()}`);
     const left = itemsIn(it.storeId).filter((i) => !i.done && i.id !== id).length;
     if (left === 0) setTimeout(() => confetti(.5), 150);
     if (navigator.vibrate) navigator.vibrate(12);
@@ -321,7 +344,7 @@ async function moveItems(ids, target) {
   let moved = 0;
   for (const id of ids) {
     const it = S.items.find((i) => i.id === id); if (!it) continue;
-    const dup = itemsIn(target).find((i) => !i.done && i.id !== id && norm(i.name) === norm(it.name));
+    const dup = isTodo(tStore) ? null : itemsIn(target).find((i) => !i.done && i.id !== id && norm(i.name) === norm(it.name));
     if (dup) {
       const merged = mergeQty(dup.qty, it.qty);
       const choice = await ask({
@@ -344,10 +367,11 @@ async function moveItems(ids, target) {
       moved++;
     }
   }
-  if (moved) { toast(`${moved === 1 ? '1 vare' : moved + ' varer'} flyttet til ${tStore.name}`); touchStore(target, `${firstName(me().name)} flyttet ${moved === 1 ? 'en vare' : moved + ' varer'} hit`); }
+  const word = isTodo(tStore) ? ['oppgave', 'oppgaver', 'en oppgave'] : ['vare', 'varer', 'en vare'];
+  if (moved) { toast(`${moved === 1 ? '1 ' + word[0] : moved + ' ' + word[1]} flyttet til ${tStore.name}`); touchStore(target, `${firstName(me().name)} flyttet ${moved === 1 ? word[2] : moved + ' ' + word[1]} hit`); }
 }
 async function moveFlow(ids, fromSid) {
-  const t = await pickStore({ title: ids.length > 1 ? `Flytt ${ids.length} varer til` : 'Flytt til', exclude: fromSid });
+  const t = await pickStore({ title: ids.length > 1 ? `Flytt ${ids.length} varer til` : 'Flytt til', exclude: fromSid, todo: isTodo(storeOf(fromSid)) });
   if (t) await moveItems(ids, t);
 }
 
@@ -400,6 +424,7 @@ async function finishTrip(sid) {
 let beat = null;
 function setPresence(sid) {
   if (!S.fid || !S.uid) return;
+  if (sid && isTodo(storeOf(sid))) sid = null;
   S.db.set(S.fid, 'members', S.uid, { shoppingIn: sid || null, lastSeen: now() }, true);
   clearInterval(beat); beat = null;
   if (sid) beat = setInterval(() => { if (document.visibilityState === 'visible') S.db.set(S.fid, 'members', S.uid, { lastSeen: now() }, true); }, 60000);
@@ -443,7 +468,28 @@ function render(back = false) {
   else if (v === 'settings') app.innerHTML = `<div class="screen ${back ? 'back' : ''}" id="screen"></div>`, refreshSettings();
   else if (v === 'history') app.innerHTML = `<div class="screen ${back ? 'back' : ''}" id="screen"></div>`, refreshHistory();
 }
+let lastClean = 0;
+function housekeeping() {
+  if (!S.fid) return;
+  if (!S.todoChecked && S.ready.stores && S.ready.meta) {
+    S.todoChecked = true;
+    const setup = S.meta.find((x) => x.id === 'setup');
+    if (!(setup && setup.todos)) {
+      S.db.batch(S.fid, [
+        { type: 'set', c: 'stores', id: 'todo-hjemme', data: { name: 'Hjemme', type: 'todo', color: '#5ED3B8', order: 1e9 }, merge: true },
+        { type: 'set', c: 'stores', id: 'todo-hytta', data: { name: 'Hytta', type: 'todo', color: '#FFD166', order: 1e9 + 1 }, merge: true },
+        { type: 'set', c: 'meta', id: 'setup', data: { todos: true }, merge: true }
+      ]);
+    }
+  }
+  if (S.ready.items && now() - lastClean > 60000) {
+    lastClean = now();
+    const old = S.items.filter((i) => expired(i) && isTodo(storeOf(i.storeId)));
+    if (old.length) S.db.batch(S.fid, old.map((i) => ({ type: 'delete', c: 'items', id: i.id })));
+  }
+}
 function refresh() {
+  housekeeping();
   const v = S.view.name;
   if (v === 'home') refreshHome(false);
   else if (v === 'store') { if (!storeOf(S.view.sid)) { if (S.ready.stores) go('home', {}, true); return; } refreshStore(); }
@@ -537,14 +583,15 @@ function refreshHome(first) {
     </button>
     <span class="offline pill">${I.cloudOff} Uten nett – endringer lagres og sendes senere</span>
     ${S.db.mode === 'local' ? '<span class="pill">Demomodus – lagres bare på denne enheten</span>' : ''}
-    <div class="section-row"><h2 class="section">Butikker</h2><span class="small muted">${stores.length > 1 ? 'Hold inne og dra for å sortere' : ''}</span></div>
+    <div class="section-row"><h2 class="section">Lister</h2><span class="small muted">${stores.length > 1 ? 'Hold inne og dra for å sortere' : ''}</span></div>
     <div class="stores">
       ${stores.map((s, i) => storeCard(s, first ? i : -1)).join('')}
-      <button class="dashed-btn" data-act="new-store">${I.plus} Ny butikkliste</button>
+      <button class="dashed-btn" data-act="new-store">${I.plus} Ny liste</button>
     </div>
     ${stores.length ? `<button class="fab" data-act="add" aria-label="Legg til vare">${I.plus}</button>` : ''}`;
 }
 function storeCard(s, i) {
+  if (isTodo(s)) return todoCard(s, i);
   const list = itemsIn(s.id);
   const open = list.filter((x) => !x.done).length;
   const done = list.length - open;
@@ -558,6 +605,23 @@ function storeCard(s, i) {
       <span class="store-top"><span class="store-name">${esc(s.name)}</span><span class="small muted">${open ? open + ' igjen' : list.length ? 'Alt i kurven' : 'Tom'}</span></span>
       <span class="progress"><div style="width:${pct}%;background:${esc(s.color || COLORS[0])}"></div></span>
       <span class="store-meta">${here.length ? '<span class="live-dot on" style="display:inline-block;margin-right:6px;vertical-align:middle"></span>' : ''}${esc(meta)}</span>
+    </span></button>`;
+}
+
+function todoCard(s, i) {
+  const list = visibleIn(s.id);
+  const open = list.filter((x) => !x.done);
+  const pct = list.length ? Math.round(((list.length - open.length) / list.length) * 100) : 0;
+  const late = open.filter((x) => { const d = dueInfo(x.due); return d && d.diff < 0; }).length;
+  const today = open.filter((x) => { const d = dueInfo(x.due); return d && d.diff === 0; }).length;
+  const flags = [late ? `${late} forfalt` : '', today ? `${today} i dag` : ''].filter(Boolean).join(' · ');
+  const meta = flags || (s.last && s.last.text ? `${s.last.text} · ${ago(s.last.at)}` : 'Ingen oppgaver ennå');
+  return `<button class="store-card" data-act="open-store" data-sid="${s.id}" style="${i < 0 ? 'animation:none' : `animation-delay:${i * 0.06}s`}">
+    ${logo(s)}
+    <span class="store-body">
+      <span class="store-top"><span class="store-name">${esc(s.name)}</span><span class="small muted">${open.length ? open.length + ' igjen' : list.length ? 'Alt gjort' : 'Tom'}</span></span>
+      <span class="progress"><div style="width:${pct}%;background:${esc(s.color || COLORS[5])}"></div></span>
+      <span class="store-meta ${late ? 'late' : ''}">${esc(meta)}</span>
     </span></button>`;
 }
 
@@ -631,6 +695,7 @@ function storeCard(s, i) {
 function renderStore(back) {
   const s = storeOf(S.view.sid);
   if (!s) { go('home', {}, true); return; }
+  if (isTodo(s)) return renderTodo(back);
   app.innerHTML = `<div class="screen ${back ? 'back' : ''}" id="screen" style="padding-bottom:calc(var(--safe-bottom) + 240px)">
     <div class="topbar">
       <button class="icon-btn" data-act="home" aria-label="Tilbake til alle lister">${I.back}</button>
@@ -666,6 +731,7 @@ function renderStore(back) {
 }
 function refreshStore(first = false) {
   const sid = S.view.sid, s = storeOf(sid); if (!s || !$('#items')) return;
+  if (isTodo(s)) return refreshTodo(first);
   const list = itemsIn(sid);
   const open = list.filter((i) => !i.done);
   const done = list.filter((i) => i.done).sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0));
@@ -711,16 +777,123 @@ function refreshStore(first = false) {
 }
 function itemRow(it, i) {
   const enter = i >= 0 || !S.seen.has(it.id);
-  const by = memberOf(it.by) || (it.byName ? { name: it.byName, color: '#B0B6C0' } : null);
+  const todo = isTodo(storeOf(it.storeId));
+  const by = todo ? (it.assignee ? memberOf(it.assignee) : null) : (memberOf(it.by) || (it.byName ? { name: it.byName, color: '#B0B6C0' } : null));
+  const due = todo && !it.done ? dueInfo(it.due) : null;
   return `<div class="item-wrap" data-id="${it.id}" style="${enter ? `animation-delay:${Math.min(Math.max(i, 0), 10) * 0.03}s` : 'animation:none'}">
     <div class="item-bg">${I.move} Flytt</div>
     <div class="item ${it.done ? 'done' : ''}" data-id="${it.id}">
       <button class="check ${it.done ? 'on' : ''} ${S.popId === it.id ? 'pop' : ''}" data-act="toggle" data-id="${it.id}" aria-pressed="${it.done}" aria-label="${it.done ? 'Fjern kryss for' : 'Kryss av'} ${esc(it.name)}">${it.done ? I.check : ''}</button>
       <button class="item-text" data-act="edit-item" data-id="${it.id}" aria-label="Endre ${esc(it.name)}">
-        <span class="item-name">${esc(it.name)}</span>${it.qty ? `<span class="item-qty">${esc(it.qty)}</span>` : ''}</button>
+        <span class="item-name">${esc(it.name)}</span>${it.qty ? `<span class="item-qty">${esc(it.qty)}</span>` : ''}${due ? `<span class="item-qty due ${due.cls}">${I.cal} ${esc(due.label)}</span>` : ''}</button>
       ${by ? avatar(by, 'sm') : ''}
     </div></div>`;
 }
+/* ---------- gjøremål ---------- */
+function renderTodo(back) {
+  S.newDue = null;
+  if (S.newAssignee && !memberOf(S.newAssignee)) S.newAssignee = null;
+  app.innerHTML = `<div class="screen ${back ? 'back' : ''}" id="screen" style="padding-bottom:calc(var(--safe-bottom) + 190px)">
+    <div class="topbar">
+      <button class="icon-btn" data-act="home" aria-label="Tilbake til alle lister">${I.back}</button>
+      <span></span>
+      <div class="actions"><button class="icon-btn" data-act="edit-store" aria-label="Rediger listen">${I.dots}</button></div>
+    </div>
+    <div class="list-head" id="list-head"></div>
+    <span class="offline pill">${I.cloudOff} Uten nett – endringer sendes når du får dekning</span>
+    <div class="items" id="items"></div>
+  </div>
+  <div class="bottom-bar"><div class="bottom-inner">
+    <div class="suggest" id="assign" aria-label="Hvem skal gjøre det?"></div>
+    <form class="addbar" id="addform" autocomplete="off">
+      <label class="sr-only" for="newitem">Ny oppgave</label>
+      <input id="newitem" placeholder="Ny oppgave …" enterkeyhint="done">
+      <input type="date" id="newdue" class="sr-only" tabindex="-1" aria-hidden="true">
+      <button class="add-btn" aria-label="Legg til">${I.plus}</button>
+    </form>
+  </div></div>`;
+  const input = $('#newitem');
+  $('#addform').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const v = input.value.trim(); if (!v) { input.focus(); return; }
+    if (addItem(S.view.sid, v, '', { assignee: S.newAssignee, due: S.newDue })) { input.value = ''; S.newDue = null; renderAssign(); }
+  });
+  $('#newdue').addEventListener('change', (e) => { S.newDue = e.target.value || null; renderAssign(); });
+  bindSwipe($('#items'));
+  refreshTodo(true);
+}
+function renderAssign() {
+  const el = $('#assign'); if (!el) return;
+  const due = dueInfo(S.newDue);
+  el.innerHTML = S.members.map((m) => {
+    const on = S.newAssignee === m.id;
+    return `<button type="button" class="chip ${on ? 'on' : ''}" data-act="assign" data-uid="${m.id}" aria-pressed="${on}">${avatar(m, 'xs')}${esc(firstName(m.name))}</button>`;
+  }).join('') + `<button type="button" class="chip ${due ? 'on' : 'outline'}" data-act="pick-due" aria-label="${due ? 'Fjern dato ' + esc(due.label) : 'Velg dato'}">${I.cal} ${due ? esc(due.label) + ' ✕' : 'Dato'}</button>`;
+}
+function sortTodos(list) {
+  return [...list].sort((a, b) => {
+    if (a.due && b.due) return a.due < b.due ? -1 : a.due > b.due ? 1 : (a.createdAt || 0) - (b.createdAt || 0);
+    if (a.due) return -1; if (b.due) return 1;
+    return (a.createdAt || 0) - (b.createdAt || 0);
+  });
+}
+function refreshTodo(first = false) {
+  const sid = S.view.sid, s = storeOf(sid); if (!s || !$('#items')) return;
+  const list = visibleIn(sid);
+  const open = sortTodos(list.filter((i) => !i.done));
+  const done = list.filter((i) => i.done).sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0));
+  const pct = list.length ? done.length / list.length : 0;
+  $('#list-head').innerHTML = `
+    <div style="display:flex;align-items:center;gap:14px;min-width:0">${logo(s, 'lg')}
+      <div style="min-width:0"><h1 class="title">${esc(s.name)}</h1>
+      <div class="muted" style="font-size:14px;margin-top:4px">${open.length} igjen · ${done.length} ferdig</div></div></div>
+    <div class="ring" role="img" aria-label="${Math.round(pct * 100)} prosent gjort">
+      <svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="26" fill="none" stroke="var(--track)" stroke-width="7"/>
+      <circle cx="32" cy="32" r="26" fill="none" stroke="var(--accent)" stroke-width="7" stroke-linecap="round" stroke-dasharray="163.4" stroke-dashoffset="${(163.4 * (1 - pct)).toFixed(1)}"/></svg>
+      <span aria-hidden="true">${Math.round(pct * 100)}%</span></div>`;
+  let k = 0;
+  const row = (it) => itemRow(it, first ? k++ : -1);
+  let html = '';
+  if (!list.length) html = `<div class="empty">${I.list}<div class="big">Ingen oppgaver</div><div>Velg hvem som skal gjøre det, skriv oppgaven nederst og trykk +.</div></div>`;
+  else if (!open.length) html = `<div class="empty">${I.party}<div class="big">Alt er gjort!</div><div>Ferdige oppgaver forsvinner etter et døgn.</div></div>`;
+  else html = open.map(row).join('');
+  if (done.length) html += `<div class="group-label">Ferdig</div>` + done.map(row).join('');
+  $('#items').innerHTML = html;
+  list.forEach((i) => S.seen.add(i.id));
+  S.popId = null;
+  renderAssign();
+}
+
+function openTodoSheet(id) {
+  const it = S.items.find((i) => i.id === id); if (!it) return;
+  const others = sortedStores().filter((s) => isTodo(s) && s.id !== it.storeId);
+  let who = it.assignee || null;
+  openSheet(`${head('Endre oppgave')}
+    <div class="field"><label for="t-name">Oppgave</label><input id="t-name" class="input" value="${esc(it.name)}"></div>
+    <div class="field"><span class="label">Hvem skal gjøre det?</span><div class="chips" id="t-who"></div></div>
+    <div class="field"><label for="t-due">Dato</label>
+      <div class="qty-row" style="grid-template-columns:minmax(0,1fr) auto"><input type="date" id="t-due" class="input" value="${esc(it.due || '')}">
+      <button type="button" class="btn" id="t-nodue">Ingen dato</button></div></div>
+    ${others.length ? `<div class="field"><span class="label">Flytt til</span><div class="chips">${others.map((s) => `<button type="button" class="chip square" data-move="${s.id}"><span class="dot" style="background:${esc(s.color)}"></span>${esc(s.name)}</button>`).join('')}</div></div>` : ''}
+    <div class="actions-col"><button class="btn primary block" id="t-save">Lagre</button><button class="btn danger block" id="t-del">Slett oppgave</button></div>`,
+  (sh, close) => {
+    const draw = () => {
+      $('#t-who', sh).innerHTML = `<button type="button" class="chip ${who ? '' : 'on'}" data-who="" aria-pressed="${!who}">Ingen</button>` +
+        S.members.map((m) => `<button type="button" class="chip ${who === m.id ? 'on' : ''}" data-who="${m.id}" aria-pressed="${who === m.id}">${avatar(m, 'xs')}${esc(firstName(m.name))}</button>`).join('');
+    };
+    draw();
+    $('#t-who', sh).addEventListener('click', (e) => { const b = e.target.closest('[data-who]'); if (b) { who = b.dataset.who || null; draw(); } });
+    $('#t-nodue', sh).onclick = () => { $('#t-due', sh).value = ''; };
+    $('#t-save', sh).onclick = () => {
+      const name = cap($('#t-name', sh).value.trim()); if (!name) return;
+      S.db.update(S.fid, 'items', id, { name, assignee: who, due: $('#t-due', sh).value || null });
+      close();
+    };
+    $('#t-del', sh).onclick = () => { close(); deleteItem(id); };
+    sh.querySelectorAll('[data-move]').forEach((b) => b.onclick = () => { close(); setTimeout(() => moveItems([id], b.dataset.move), 220); });
+  });
+}
+
 function renderSuggest() {
   const el = $('#suggest'); const input = $('#newitem'); if (!el || !input) return;
   const q = input.value.trim();
@@ -798,8 +971,8 @@ function bindQty(sh) {
 }
 
 function openAddSheet(presetSid) {
-  const stores = sortedStores();
-  let sid = presetSid || (S.view.name === 'store' ? S.view.sid : (stores[0] && stores[0].id));
+  const stores = sortedStores().filter((x) => !isTodo(x));
+  let sid = [presetSid, S.view.name === 'store' ? S.view.sid : null].find((x) => x && stores.some((st) => st.id === x)) || (stores[0] && stores[0].id);
   let unitTouched = false, nTouched = false;
   openSheet(`${head('Legg til vare')}
     <div class="field"><label for="a-name">Hva trenger dere?</label>
@@ -848,6 +1021,7 @@ function openAddSheet(presetSid) {
 /* ---------- ark: endre vare ---------- */
 function openItemSheet(id) {
   const it = S.items.find((i) => i.id === id); if (!it) return;
+  if (isTodo(storeOf(it.storeId))) return openTodoSheet(id);
   const others = sortedStores().filter((s) => s.id !== it.storeId);
   const p = it.qty ? parseQty(it.qty) : null;
   const odd = it.qty && !p; // f.eks. «1 stk + 2 liter»
@@ -878,20 +1052,22 @@ function openItemSheet(id) {
 }
 
 /* ---------- ark: butikk ---------- */
-function openStoreSheet(sid) {
+function openStoreSheet(sid, newType) {
   const s = sid ? storeOf(sid) : null;
-  const d = s ? { ...s } : { name: '', domain: '', color: COLORS[S.stores.length % COLORS.length], flyer: '', image: '' };
-  openSheet(`${head(s ? 'Rediger butikk' : 'Ny butikk')}
+  const todo = s ? isTodo(s) : newType === 'todo';
+  const d = s ? { ...s } : { name: '', domain: '', color: COLORS[S.stores.length % COLORS.length], flyer: '', image: '', type: todo ? 'todo' : undefined };
+  const noun = todo ? 'liste' : 'butikk';
+  openSheet(`${head(s ? `Rediger ${noun}` : todo ? 'Ny gjøremålsliste' : 'Ny butikk')}
     <div class="row" style="justify-content:flex-start;gap:16px"><div id="s-logo"></div>
-      <div class="small muted" style="flex:1">Logoen hentes automatisk fra nettsiden. Du kan også velge et eget bilde.</div></div>
-    <div class="field"><label for="s-name">Navn</label><input id="s-name" class="input" value="${esc(d.name)}" placeholder="F.eks. Rema 1000" ${s ? '' : 'autofocus'}></div>
-    <div class="field"><label for="s-domain">Nettside (for logo)</label><input id="s-domain" class="input" value="${esc(d.domain)}" placeholder="f.eks. rema.no" inputmode="url" autocapitalize="off"></div>
+      <div class="small muted" style="flex:1">${todo ? 'Velg navn og farge på listen.' : 'Logoen hentes automatisk fra nettsiden. Du kan også velge et eget bilde.'}</div></div>
+    <div class="field"><label for="s-name">Navn</label><input id="s-name" class="input" value="${esc(d.name)}" placeholder="${todo ? 'F.eks. Hagen' : 'F.eks. Rema 1000'}" ${s ? '' : 'autofocus'}></div>
+    <div class="field" ${todo ? 'hidden' : ''}><label for="s-domain">Nettside (for logo)</label><input id="s-domain" class="input" value="${esc(d.domain || '')}" placeholder="f.eks. rema.no" inputmode="url" autocapitalize="off"></div>
     <div class="field"><span class="label">Farge</span><div class="chips" id="s-colors"></div></div>
-    <div class="field"><label for="s-flyer">Lenke til tilbudsavis (valgfritt)</label><input id="s-flyer" class="input" value="${esc(d.flyer)}" placeholder="https://…" inputmode="url" autocapitalize="off"></div>
-    <div class="chips"><label class="btn" style="cursor:pointer">${I.image} Velg eget bilde<input type="file" accept="image/*" id="s-file" class="sr-only"></label>
+    <div class="field" ${todo ? 'hidden' : ''}><label for="s-flyer">Lenke til tilbudsavis (valgfritt)</label><input id="s-flyer" class="input" value="${esc(d.flyer || '')}" placeholder="https://…" inputmode="url" autocapitalize="off"></div>
+    <div class="chips" ${todo ? 'hidden' : ''}><label class="btn" style="cursor:pointer">${I.image} Velg eget bilde<input type="file" accept="image/*" id="s-file" class="sr-only"></label>
       <button type="button" class="btn" id="s-noimg" ${d.image ? '' : 'hidden'}>Fjern bilde</button></div>
-    <div class="actions-col"><button class="btn primary block" id="s-save">${s ? 'Lagre' : 'Lag butikk'}</button>
-      ${s ? '<button class="btn danger block" id="s-del">Slett butikken</button>' : ''}</div>`,
+    <div class="actions-col"><button class="btn primary block" id="s-save">${s ? 'Lagre' : todo ? 'Lag listen' : 'Lag butikk'}</button>
+      ${s ? `<button class="btn danger block" id="s-del">Slett ${todo ? 'listen' : 'butikken'}</button>` : ''}</div>`,
   (sh, close) => {
     const draw = () => {
       $('#s-logo', sh).innerHTML = logo({ ...d, name: d.name || '?' }, 'lg');
@@ -910,7 +1086,7 @@ function openStoreSheet(sid) {
     $('#s-save', sh).onclick = () => {
       d.name = $('#s-name', sh).value.trim(); d.domain = cleanDomain($('#s-domain', sh).value); d.flyer = $('#s-flyer', sh).value.trim();
       if (!d.name) { $('#s-name', sh).focus(); return; }
-      const data = { name: d.name, domain: d.domain, color: d.color, flyer: d.flyer, image: d.image || '' };
+      const data = todo ? { name: d.name, color: d.color, type: 'todo' } : { name: d.name, domain: d.domain, color: d.color, flyer: d.flyer, image: d.image || '' };
       if (s) S.db.set(S.fid, 'stores', sid, data, true);
       else S.db.set(S.fid, 'stores', S.db.newId(), { ...data, order: now() });
       close();
@@ -918,7 +1094,7 @@ function openStoreSheet(sid) {
     if (s) $('#s-del', sh).onclick = async () => {
       close();
       const n = itemsIn(sid).length;
-      const ok = await ask({ title: `Slette ${s.name}?`, text: n ? `${n} varer på listen slettes også.` : 'Listen er tom.', buttons: [{ label: 'Slett butikken', value: true, kind: 'primary' }, { label: 'Avbryt', value: false }] });
+      const ok = await ask({ title: `Slette ${s.name}?`, text: n ? `${n} ${todo ? 'oppgaver' : 'varer'} på listen slettes også.` : 'Listen er tom.', buttons: [{ label: todo ? 'Slett listen' : 'Slett butikken', value: true, kind: 'primary' }, { label: 'Avbryt', value: false }] });
       if (!ok) return;
       S.db.batch(S.fid, [{ type: 'delete', c: 'stores', id: sid }, ...itemsIn(sid).map((i) => ({ type: 'delete', c: 'items', id: i.id }))]);
       if (S.view.name === 'store') go('home', {}, true);
@@ -965,9 +1141,9 @@ function refreshSettings() {
         <button data-act="sort" data-v="added" class="${S.sort !== 'cat' ? 'on' : ''}" aria-pressed="${S.sort !== 'cat'}">Slik de ble lagt inn</button></div></div>
     </div>
     <div class="card">
-      <div class="row"><h2 class="section">Butikker</h2></div>
-      <div>${sortedStores().map((s) => `<button class="list-row" data-act="edit-store" data-sid="${s.id}">${logo(s)}<span class="grow"><b>${esc(s.name)}</b><br><span class="small muted">${esc(s.domain || 'Ingen nettside')}</span></span>${I.chev}</button>`).join('')}</div>
-      <button class="dashed-btn" data-act="new-store" style="min-height:52px">${I.plus} Ny butikk</button>
+      <div class="row"><h2 class="section">Lister</h2></div>
+      <div>${sortedStores().map((s) => `<button class="list-row" data-act="edit-store" data-sid="${s.id}">${logo(s)}<span class="grow"><b>${esc(s.name)}</b><br><span class="small muted">${isTodo(s) ? 'Gjøremålsliste' : esc(s.domain || 'Ingen nettside')}</span></span>${I.chev}</button>`).join('')}</div>
+      <button class="dashed-btn" data-act="new-store" style="min-height:52px">${I.plus} Ny liste</button>
     </div>
     <div class="card">
       <h2 class="section">Familien</h2>
@@ -1022,7 +1198,20 @@ document.addEventListener('click', async (e) => {
     case 'history': go('history'); break;
     case 'open-store': go('store', { sid: t.dataset.sid }); break;
     case 'add': openAddSheet(); break;
-    case 'new-store': openStoreSheet(null); break;
+    case 'new-store': {
+      const type = await ask({ title: 'Ny liste', text: 'Hva slags liste vil du lage?', buttons: [
+        { label: 'Butikk (handleliste)', value: 'shop', kind: 'primary' }, { label: 'Gjøremålsliste', value: 'todo', kind: 'primary' }, { label: 'Avbryt', value: null, kind: 'danger' }] });
+      if (type) setTimeout(() => openStoreSheet(null, type), 10);
+      break;
+    }
+    case 'assign': S.newAssignee = S.newAssignee === t.dataset.uid ? null : t.dataset.uid; renderAssign(); break;
+    case 'pick-due': {
+      if (S.newDue) { S.newDue = null; renderAssign(); break; }
+      const d = $('#newdue'); if (!d) break;
+      d.value = '';
+      try { if (d.showPicker) d.showPicker(); else d.click(); } catch (er) { d.click(); }
+      break;
+    }
     case 'edit-store': openStoreSheet(t.dataset.sid || S.view.sid); break;
     case 'toggle': toggleItem(t.dataset.id); break;
     case 'edit-item': openItemSheet(t.dataset.id); break;
@@ -1070,7 +1259,7 @@ document.addEventListener('click', async (e) => {
       if (!ok) break;
       setPresence(null);
       S.db.remove(S.fid, 'members', S.uid);
-      unsubscribe(); LS.set('fid', null); S.fid = null;
+      unsubscribe(); LS.set('fid', null); S.fid = null; S.todoChecked = false; S.ready.meta = false;
       S.members = []; S.stores = []; S.items = []; S.trips = [];
       S.view = { name: 'welcome' }; render();
       break;
@@ -1094,7 +1283,7 @@ function subscribe() {
       toast('Du har ikke lenger tilgang til denne familielisten');
     }
   });
-  S.unsubs = [w('members', 'members'), w('stores', 'stores'), w('items', 'items'), w('trips'), w('names')];
+  S.unsubs = [w('members', 'members'), w('stores', 'stores'), w('items', 'items'), w('trips'), w('names'), w('meta', 'meta')];
 }
 function unsubscribe() { S.unsubs.forEach((u) => { try { u(); } catch (e) {} }); S.unsubs = []; }
 setInterval(() => { if (S.view.name === 'home') refreshHome(false); }, 60000); // oppdater «x min siden»
