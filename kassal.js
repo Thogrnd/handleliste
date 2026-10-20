@@ -1,6 +1,6 @@
 ﻿// Produktsøk og priser fra Kassalapp (kassal.app).
 // Nøkkelen er ikke hemmelig i praksis: verste fall kan noen bruke opp gratiskvoten.
-export const KASSAL_KEY = '';
+export const KASSAL_KEY = '96syXIxNF6qmZzffm3QxcGZbgrIaipfe6vrG8lhO481098e3';
 
 const BASE = 'https://kassal.app/api/v1';
 const cache = new Map();
