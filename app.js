@@ -310,7 +310,7 @@ function addItem(sid, name, qty = '', extra = {}) {
   const m = me();
   const data = { storeId: sid, name, qty: todo ? '' : (qty || ''), cat: todo ? '' : categorize(name), done: false, createdAt: now(), by: S.uid, byName: m.name || '' };
   if (todo) { data.assignee = extra.assignee || null; data.due = extra.due || null; }
-  else if (extra.ean) { data.ean = extra.ean; data.img = extra.img || ''; data.price = typeof extra.price === 'number' ? extra.price : null; data.priceAt = now(); }
+  else if (extra.ean) { data.ean = extra.ean; data.img = extra.img || ''; data.size = extra.size || ''; data.price = typeof extra.price === 'number' ? extra.price : null; data.priceAt = now(); }
   S.db.set(S.fid, 'items', id, data);
   touchStore(sid, todo ? `${firstName(m.name)} la til «${name}»` : `${firstName(m.name)} la til ${name.toLowerCase()}`);
   if (!todo) bumpName(name, extra);
@@ -800,7 +800,7 @@ function itemRow(it, i) {
     <div class="item-bg">${I.move} Flytt</div>
     <div class="item ${it.done ? 'done' : ''}" data-id="${it.id}">
       <button class="check ${it.done ? 'on' : ''} ${S.popId === it.id ? 'pop' : ''}" data-act="toggle" data-id="${it.id}" aria-pressed="${it.done}" aria-label="${it.done ? 'Fjern kryss for' : 'Kryss av'} ${esc(it.name)}">${it.done ? I.check : ''}</button>
-      ${it.img && !todo ? `<img class="item-img" src="${esc(it.img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
+      ${it.img && !todo ? `<button class="item-img-btn" data-act="edit-item" data-id="${it.id}" aria-label="Vis ${esc(it.name)}"><img class="item-img" src="${esc(it.img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentNode.remove()"></button>` : ''}
       <button class="item-text" data-act="edit-item" data-id="${it.id}" aria-label="Endre ${esc(it.name)}">
         <span class="item-name">${esc(it.name)}</span>${sub ? `<span class="item-qty">${esc(sub)}</span>` : ''}${due ? `<span class="item-qty due ${due.cls}">${I.cal} ${esc(due.label)}</span>` : ''}</button>
       ${by ? avatar(by, 'sm') : ''}
@@ -1084,13 +1084,30 @@ function openAddSheet(presetSid) {
 }
 
 /* ---------- ark: endre vare ---------- */
+function zoomImage(src, name) {
+  const el = document.createElement('div');
+  el.className = 'zoom';
+  el.setAttribute('role', 'dialog'); el.setAttribute('aria-label', name || 'Bilde');
+  el.innerHTML = `<img src="${esc(src)}" alt="${esc(name || '')}" referrerpolicy="no-referrer"><button class="icon-btn zoom-close" aria-label="Lukk">${I.close}</button>`;
+  const close = () => { document.removeEventListener('keydown', onKey, true); el.classList.add('out'); setTimeout(() => el.remove(), 200); };
+  const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+  el.addEventListener('click', close);
+  document.addEventListener('keydown', onKey, true);
+  document.body.appendChild(el);
+  el.querySelector('.zoom-close').focus();
+}
 function openItemSheet(id) {
   const it = S.items.find((i) => i.id === id); if (!it) return;
   if (isTodo(storeOf(it.storeId))) return openTodoSheet(id);
   const others = sortedStores().filter((s) => s.id !== it.storeId);
   const p = it.qty ? parseQty(it.qty) : null;
   const odd = it.qty && !p; // f.eks. «1 stk + 2 liter»
+  const hero = it.img ? `<div class="hero">
+      <button type="button" class="hero-img" id="e-zoom" aria-label="Vis bildet i full størrelse"><img src="${esc(it.img)}" alt="${esc(it.name)}" referrerpolicy="no-referrer"></button>
+      <div class="hero-info"><div class="hero-name">${esc(it.name)}</div>${it.size ? `<div class="small muted">${esc(it.size)}</div>` : ''}
+      <div class="hero-price" id="e-price"></div></div></div>` : '';
   openSheet(`${head('Endre vare')}
+    ${hero}
     <div class="field"><label for="e-name">Navn</label><input id="e-name" class="input" value="${esc(it.name)}"></div>
     ${qtyFields(p ? p.n : NaN, p ? p.unit : defaultUnit(it.name))}
     ${odd ? `<p class="small muted" style="margin-top:-8px">Nå: ${esc(it.qty)}. Velg antall og enhet for å erstatte.</p>` : ''}
@@ -1100,8 +1117,16 @@ function openItemSheet(id) {
   (sh, close) => {
     const getQty = bindQty(sh);
     let qtyTouched = false;
-    $('#q-n', sh).addEventListener('input', () => { qtyTouched = true; });
-    $('#q-unit', sh).addEventListener('change', () => { qtyTouched = true; });
+    const drawPrice = () => {
+      const el = $('#e-price', sh); if (!el) return;
+      if (typeof it.price !== 'number') { el.innerHTML = '<span class="muted small">Ingen pris for denne butikken</span>'; return; }
+      const lt = lineTotal({ price: it.price, qty: getQty() });
+      el.innerHTML = `<b>${esc(kr(it.price))}</b><span class="muted small"> / stk</span>${lt != null && Math.abs(lt - it.price) > 0.001 ? `<br><span class="small">Totalt ${esc(kr(lt))}</span>` : ''}`;
+    };
+    drawPrice();
+    $('#q-n', sh).addEventListener('input', () => { qtyTouched = true; drawPrice(); });
+    $('#q-unit', sh).addEventListener('change', () => { qtyTouched = true; drawPrice(); });
+    const z = $('#e-zoom', sh); if (z) z.onclick = () => zoomImage(it.img, it.name);
     $('#e-save', sh).onclick = () => {
       const name = cap($('#e-name', sh).value.trim()); if (!name) return;
       const qty = odd && !qtyTouched ? it.qty : getQty();
