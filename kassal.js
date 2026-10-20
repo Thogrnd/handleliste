@@ -37,7 +37,7 @@ export async function searchProducts(q, listName) {
   const key = q.toLowerCase();
   let raw = cache.get(key);
   if (!raw) {
-    const r = await call(`/products?search=${encodeURIComponent(q)}&size=60&exclude_without_ean=1`);
+    const r = await call(`/products?search=${encodeURIComponent(q)}&size=100&exclude_without_ean=1`);
     raw = (r && r.data) || [];
     cache.set(key, raw);
   }
@@ -55,7 +55,7 @@ export async function searchProducts(q, listName) {
   }
   const ql = key.split(/\s+/)[0];
   return [...by.values()]
-    .sort((a, b) => (b.name.toLowerCase().startsWith(ql) - a.name.toLowerCase().startsWith(ql)) || ((b.price != null) - (a.price != null)) || (b.hits - a.hits))
+    .sort((a, b) => ((b.price != null) - (a.price != null)) || (b.name.toLowerCase().startsWith(ql) - a.name.toLowerCase().startsWith(ql)) || (b.hits - a.hits))
     .slice(0, 20);
 }
 

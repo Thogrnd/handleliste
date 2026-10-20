@@ -1,6 +1,6 @@
 ﻿// Service worker: gjør at selve appen åpner uten nett.
 // Øk versjonsnummeret når du legger ut nye filer.
-const CACHE = 'handleliste-v6';
+const CACHE = 'handleliste-v7';
 const SHELL = [
   './', './index.html', './style.css', './app.js', './varer.js', './kassal.js', './db-firebase.js', './db-local.js',
   './firebase-config.js', './manifest.webmanifest', './icons/icon.svg', './icons/icon-192.png', './icons/apple-touch-icon.png'
@@ -21,7 +21,7 @@ self.addEventListener('fetch', (e) => {
   if (!cacheable || url.pathname.includes('/google.firestore')) return;
   // hent fra nett, fall tilbake på lagret kopi
   e.respondWith(
-    fetch(req).then((res) => {
+    (same && req.mode !== 'navigate' ? fetch(req.url, { cache: 'no-cache' }) : fetch(req, same ? { cache: 'no-cache' } : undefined)).then((res) => {
       if (res && (res.ok || res.type === 'opaque')) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(req, copy)); }
       return res;
     }).catch(() => caches.match(req, { ignoreSearch: same }).then((r) => r || (req.mode === 'navigate' ? caches.match('./index.html') : undefined)))
