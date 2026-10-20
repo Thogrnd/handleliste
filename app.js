@@ -1,5 +1,6 @@
 ﻿// Handleliste – familiens felles handleliste
 import { firebaseConfig } from './firebase-config.js';
+import { kassalOn, searchProducts, pricesFor, sameChain } from './kassal.js';
 import { CATEGORIES, COMMON, UNITS, STEPS, categorize, norm, mergeQty, splitInput, parseQty, parseNum, fmtNum, fmtQty, dictUnit, cap } from './varer.js';
 
 /* =========================================================
@@ -236,9 +237,18 @@ function touchStore(sid, text) {
 const nameKey = (name) => norm(name).replace(/[\/.#\[\]$]/g, '_').slice(0, 200) || '_';
 const nameRec = (name) => S.names.find((r) => r.id === nameKey(name));
 const defaultUnit = (name) => { const r = nameRec(name); return (r && r.unit) || dictUnit(name); };
-function bumpName(name) {
+function bumpName(name, extra = {}) {
   const r = nameRec(name);
-  S.db.set(S.fid, 'names', nameKey(name), { name, count: ((r && r.count) || 0) + 1, lastAt: now() }, true);
+  const data = { name, count: ((r && r.count) || 0) + 1, lastAt: now() };
+  if (extra.ean) { data.ean = extra.ean; data.img = extra.img || ''; }
+  S.db.set(S.fid, 'names', nameKey(name), data, true);
+}
+const kr = (v) => new Intl.NumberFormat('nb-NO', { minimumFractionDigits: v % 1 ? 2 : 0, maximumFractionDigits: 2 }).format(v) + '\u00a0kr';
+// Pris for linjen: antall × stykkpris når enheten er stk/pk, ellers stykkprisen
+function lineTotal(it) {
+  if (typeof it.price !== 'number') return null;
+  const p = it.qty ? parseQty(it.qty) : null;
+  return p && (p.unit === 'stk' || p.unit === 'pk') ? p.n * it.price : it.price;
 }
 // Enheten blir ny standard etter tre handleturer på rad med samme (avvikende) enhet.
 function unitOps(doneItems) {
@@ -300,21 +310,23 @@ function addItem(sid, name, qty = '', extra = {}) {
   const m = me();
   const data = { storeId: sid, name, qty: todo ? '' : (qty || ''), cat: todo ? '' : categorize(name), done: false, createdAt: now(), by: S.uid, byName: m.name || '' };
   if (todo) { data.assignee = extra.assignee || null; data.due = extra.due || null; }
+  else if (extra.ean) { data.ean = extra.ean; data.img = extra.img || ''; data.price = typeof extra.price === 'number' ? extra.price : null; data.priceAt = now(); }
   S.db.set(S.fid, 'items', id, data);
   touchStore(sid, todo ? `${firstName(m.name)} la til «${name}»` : `${firstName(m.name)} la til ${name.toLowerCase()}`);
-  if (!todo) bumpName(name);
+  if (!todo) bumpName(name, extra);
   return true;
 }
 
 // Tallvelger: velg antall for en vare fra forslagsraden
-function openQtyPicker(name, sid, after) {
-  const unit = defaultUnit(name);
+function openQtyPicker(name, sid, after, extra = {}) {
+  const unit = extra.ean ? 'stk' : defaultUnit(name);
   openSheet(`${head(name)}
+    ${extra.img ? `<div class="pick-prod"><img src="${esc(extra.img)}" alt="" referrerpolicy="no-referrer"><span>${extra.size ? esc(extra.size) + '<br>' : ''}${typeof extra.price === 'number' ? `<b>${esc(kr(extra.price))}</b>` : '<span class="muted">Ingen pris for denne butikken</span>'}</span></div>` : ''}
     <p class="muted" style="margin-top:-8px">Velg antall (${esc(unit)})</p>
     <div class="qty-grid">${STEPS.map((n) => `<button type="button" class="qty-btn" data-n="${n}">${fmtNum(n)}</button>`).join('')}</div>
     <button type="button" class="btn block" data-none>Legg til uten antall</button>`,
   (sh, close) => {
-    const done = (qty) => { if (addItem(sid, name, qty)) { toast(`${name}${qty ? ' (' + qty + ')' : ''} lagt til`); if (after) after(); } close(); };
+    const done = (qty) => { if (addItem(sid, name, qty, extra)) { toast(`${name}${qty ? ' (' + qty + ')' : ''} lagt til`); if (after) after(); } close(); };
     sh.querySelectorAll('[data-n]').forEach((b) => b.onclick = () => done(fmtQty({ n: +b.dataset.n, unit })));
     sh.querySelector('[data-none]').onclick = () => done('');
   });
@@ -363,7 +375,7 @@ async function moveItems(ids, target) {
         S.db.remove(S.fid, 'items', id); moved++;
       }
     } else {
-      S.db.update(S.fid, 'items', id, { storeId: target, done: false, doneAt: null, doneBy: null });
+      S.db.update(S.fid, 'items', id, { storeId: target, done: false, doneAt: null, doneBy: null, price: null, priceAt: 0 });
       moved++;
     }
   }
@@ -711,6 +723,7 @@ function renderStore(back) {
   </div>
   <div class="bottom-bar"><div class="bottom-inner">
     <div id="finish"></div>
+    <div class="products" id="products" aria-label="Treff i nettbutikken" hidden></div>
     <div class="suggest" id="suggest" aria-label="Forslag"></div>
     <form class="addbar" id="addform" autocomplete="off">
       <label class="sr-only" for="newitem">Ny vare</label>
@@ -723,9 +736,10 @@ function renderStore(back) {
     e.preventDefault();
     const v = input.value.trim(); if (!v) { openAddSheet(S.view.sid); return; }
     const { name, qty } = parseInput(v);
-    if (addItem(S.view.sid, name, qty)) { input.value = ''; renderSuggest(); }
+    if (addItem(S.view.sid, name, qty)) { input.value = ''; renderSuggest(); renderProducts([]); }
   });
-  input.addEventListener('input', renderSuggest);
+  input.addEventListener('input', () => { renderSuggest(); queueSearch(); });
+  refreshPrices(S.view.sid);
   bindSwipe($('#items'));
   refreshStore(true);
 }
@@ -742,7 +756,7 @@ function refreshStore(first = false) {
   $('#list-head').innerHTML = `
     <div style="display:flex;align-items:center;gap:14px;min-width:0">${logo(s, 'lg')}
       <div style="min-width:0"><h1 class="title">${esc(s.name)}</h1>
-      <div class="muted" style="font-size:14px;margin-top:4px">${open.length} igjen · ${done.length} i kurven</div></div></div>
+      <div class="muted" style="font-size:14px;margin-top:4px">${open.length} igjen · ${done.length} i kurven${sumText(list)}</div></div></div>
     <div class="ring" role="img" aria-label="${Math.round(pct * 100)} prosent handlet">
       <svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="26" fill="none" stroke="var(--track)" stroke-width="7"/>
       <circle cx="32" cy="32" r="26" fill="none" stroke="var(--accent)" stroke-width="7" stroke-linecap="round" stroke-dasharray="163.4" stroke-dashoffset="${(163.4 * (1 - pct)).toFixed(1)}"/></svg>
@@ -780,12 +794,15 @@ function itemRow(it, i) {
   const todo = isTodo(storeOf(it.storeId));
   const by = todo ? (it.assignee ? memberOf(it.assignee) : null) : (memberOf(it.by) || (it.byName ? { name: it.byName, color: '#B0B6C0' } : null));
   const due = todo && !it.done ? dueInfo(it.due) : null;
+  const lt = todo ? null : lineTotal(it);
+  const sub = [it.qty || '', lt != null ? kr(lt) : ''].filter(Boolean).join(' · ');
   return `<div class="item-wrap" data-id="${it.id}" style="${enter ? `animation-delay:${Math.min(Math.max(i, 0), 10) * 0.03}s` : 'animation:none'}">
     <div class="item-bg">${I.move} Flytt</div>
     <div class="item ${it.done ? 'done' : ''}" data-id="${it.id}">
       <button class="check ${it.done ? 'on' : ''} ${S.popId === it.id ? 'pop' : ''}" data-act="toggle" data-id="${it.id}" aria-pressed="${it.done}" aria-label="${it.done ? 'Fjern kryss for' : 'Kryss av'} ${esc(it.name)}">${it.done ? I.check : ''}</button>
+      ${it.img && !todo ? `<img class="item-img" src="${esc(it.img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
       <button class="item-text" data-act="edit-item" data-id="${it.id}" aria-label="Endre ${esc(it.name)}">
-        <span class="item-name">${esc(it.name)}</span>${it.qty ? `<span class="item-qty">${esc(it.qty)}</span>` : ''}${due ? `<span class="item-qty due ${due.cls}">${I.cal} ${esc(due.label)}</span>` : ''}</button>
+        <span class="item-name">${esc(it.name)}</span>${sub ? `<span class="item-qty">${esc(sub)}</span>` : ''}${due ? `<span class="item-qty due ${due.cls}">${I.cal} ${esc(due.label)}</span>` : ''}</button>
       ${by ? avatar(by, 'sm') : ''}
     </div></div>`;
 }
@@ -892,6 +909,54 @@ function openTodoSheet(id) {
     $('#t-del', sh).onclick = () => { close(); deleteItem(id); };
     sh.querySelectorAll('[data-move]').forEach((b) => b.onclick = () => { close(); setTimeout(() => moveItems([id], b.dataset.move), 220); });
   });
+}
+
+/* ---------- nettbutikk-søk (Kassalapp) ---------- */
+let searchTimer = 0, searchSeq = 0, lastProducts = [];
+function sumText(list) {
+  const priced = list.map(lineTotal).filter((v) => v != null);
+  if (!priced.length) return '';
+  return ` · ca.\u00a0${kr(Math.round(priced.reduce((a, b) => a + b, 0)))}`;
+}
+function queueSearch() {
+  clearTimeout(searchTimer);
+  if (!kassalOn()) return;
+  const input = $('#newitem'); if (!input) return;
+  const q = parseInput(input.value).name || '';
+  if (q.trim().length < 2) { searchSeq++; renderProducts([]); return; }
+  const seq = ++searchSeq;
+  searchTimer = setTimeout(async () => {
+    const s = storeOf(S.view.sid); if (!s) return;
+    try {
+      const res = await searchProducts(q, s.name);
+      if (seq === searchSeq && $('#newitem') && $('#newitem').value.trim()) renderProducts(res);
+    } catch (e) { console.warn('Produktsøk feilet', e); if (seq === searchSeq) renderProducts([]); }
+  }, 300);
+}
+function renderProducts(list) {
+  const el = $('#products'); if (!el) return;
+  lastProducts = list;
+  el.hidden = !list.length;
+  el.innerHTML = list.map((p, i) => `<button type="button" class="prod" data-act="product" data-i="${i}">
+    ${p.img ? `<img src="${esc(p.img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'">` : '<span class="noimg"></span>'}
+    <span class="prod-text"><span class="prod-name">${esc(p.name)}</span><span class="small muted">${esc([p.brand, p.size].filter(Boolean).join(' · '))}</span></span>
+    <span class="prod-price">${p.price != null ? esc(kr(p.price)) : ''}</span></button>`).join('');
+  el.scrollTop = 0;
+}
+// Oppdater priser for varer med strekkode (maks hver 6. time per vare)
+const priceBusy = new Set();
+async function refreshPrices(sid, force = false) {
+  const s = storeOf(sid);
+  if (!kassalOn() || !s || isTodo(s) || priceBusy.has(sid) || !navigator.onLine) return;
+  const due = itemsIn(sid).filter((i) => i.ean && (force || !i.priceAt || now() - i.priceAt > 6 * 3600 * 1000));
+  if (!due.length) return;
+  priceBusy.add(sid);
+  try {
+    const prices = await pricesFor([...new Set(due.map((i) => i.ean))], s.name);
+    const ops = due.filter((i) => i.ean in prices).map((i) => ({ type: 'update', c: 'items', id: i.id, data: { price: prices[i.ean], priceAt: now() } }));
+    if (ops.length) S.db.batch(S.fid, ops);
+  } catch (e) { console.warn('Prisoppdatering feilet', e); }
+  finally { priceBusy.delete(sid); }
 }
 
 function renderSuggest() {
@@ -1204,6 +1269,17 @@ document.addEventListener('click', async (e) => {
       if (type) setTimeout(() => openStoreSheet(null, type), 10);
       break;
     }
+    case 'product': {
+      const p = lastProducts[+t.dataset.i]; if (!p) break;
+      const input = $('#newitem');
+      const typed = input.value.trim() ? parseQty(parseInput(input.value).qty) : null;
+      const extra = { ean: p.ean, img: p.img, price: p.price, size: p.size };
+      const name = p.name;
+      const clear = () => { input.value = ''; renderSuggest(); renderProducts([]); };
+      if (typed) { if (addItem(S.view.sid, name, fmtQty({ n: typed.n, unit: 'stk' }), extra)) clear(); }
+      else openQtyPicker(name, S.view.sid, clear, extra);
+      break;
+    }
     case 'assign': S.newAssignee = S.newAssignee === t.dataset.uid ? null : t.dataset.uid; renderAssign(); break;
     case 'pick-due': {
       if (S.newDue) { S.newDue = null; renderAssign(); break; }
@@ -1221,8 +1297,10 @@ document.addEventListener('click', async (e) => {
       const name = t.dataset.name;
       const typed = input.value.trim() ? parseQty(parseInput(input.value).qty) : null;
       const clear = () => { input.value = ''; renderSuggest(); };
-      if (typed) { if (addItem(S.view.sid, name, fmtQty({ n: typed.n, unit: defaultUnit(name) }))) clear(); }
-      else openQtyPicker(name, S.view.sid, clear);
+      const rec = nameRec(name);
+      const extra = rec && rec.ean ? { ean: rec.ean, img: rec.img || '', price: null } : {};
+      if (typed) { if (addItem(S.view.sid, name, fmtQty({ n: typed.n, unit: extra.ean ? 'stk' : defaultUnit(name) }), extra)) { clear(); if (extra.ean) setTimeout(() => refreshPrices(S.view.sid, true), 800); } }
+      else openQtyPicker(name, S.view.sid, () => { clear(); if (extra.ean) setTimeout(() => refreshPrices(S.view.sid, true), 800); }, extra);
       break;
     }
     case 'flyer': {
